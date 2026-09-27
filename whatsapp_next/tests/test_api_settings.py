@@ -152,6 +152,29 @@ class TestApiSettings(IntegrationTestCase):
 			with self.assertRaises(WANotSupportedError):
 				api.get_usage(from_date="2026-02-01", to_date="2026-02-02")
 
+	def test_get_site_usage_counts_this_sites_log(self):
+		from frappe.utils import add_days, getdate, nowdate
+
+		today = getdate(nowdate())
+		start = add_days(today, -2)
+		with as_user("WhatsApp Viewer"):
+			out = api.get_site_usage(from_date=start, to_date=today)
+		self.assertEqual([r["key"] for r in out["rows"]], [str(add_days(start, i)) for i in range(3)])
+		row = out["rows"][-1]
+		since = f"{today} 00:00:00"
+		count = lambda statuses: frappe.db.count(
+			"WhatsApp Log", {"creation": (">=", since), "status": ("in", statuses)}
+		)
+		self.assertEqual(row["sent"], count(["Sent", "Delivered", "Read"]))
+		self.assertEqual(row["delivered"], count(["Delivered", "Read"]))
+		self.assertEqual(row["failed"], count(["Failed"]))
+		with as_user("WhatsApp Viewer"), self.assertRaises(WAValidationError):
+			api.get_site_usage(from_date=today, to_date=start)
+		with as_user("WhatsApp Viewer"), self.assertRaises(WAValidationError):
+			api.get_site_usage(from_date=add_days(today, -200), to_date=today)
+		with as_user("_none"), self.assertRaises(WAPermissionError):
+			api.get_site_usage(from_date=start, to_date=today)
+
 	# --- webhook --------------------------------------------------------------------------
 
 	def test_webhook_lifecycle(self):
@@ -202,3 +225,35 @@ class TestApiSettings(IntegrationTestCase):
 				api.get_doctype_fields(document_type="Contact Phone")
 			with self.assertRaises(WAValidationError):
 				api.get_doctype_fields(document_type="No Such DocType")
+
+
+class TestContactOpenToAll(IntegrationTestCase):
+	"""R-028 / D-125: the app reports role All's rights on the core Contact, it never removes them."""
+
+	def test_reports_the_rights_of_role_all_only(self):
+		from unittest.mock import patch
+
+		from whatsapp_next.services import permissions
+
+		def perm(role, **rights):
+			return frappe._dict(role=role, permlevel=0, **rights)
+
+		meta = frappe._dict(
+			permissions=[
+				perm("All", read=1, write=1, create=0),
+				perm("System Manager", read=1, write=1, create=1, delete=1),
+				frappe._dict(role="All", permlevel=1, read=1, delete=1),  # other levels do not count
+			]
+		)
+		with patch.object(frappe, "get_meta", return_value=meta):
+			self.assertEqual(permissions.contact_open_to_all(), ["read", "write"])
+		meta.permissions = [perm("Sales User", read=1)]
+		with patch.object(frappe, "get_meta", return_value=meta):
+			self.assertEqual(permissions.contact_open_to_all(), [])
+
+	def test_policy_section_carries_it(self):
+		with as_user("System Manager"):
+			out = api.get_settings(section="policy")["policy"]
+		from whatsapp_next.services import permissions
+
+		self.assertEqual(out["contact_open_to_all"], permissions.contact_open_to_all())

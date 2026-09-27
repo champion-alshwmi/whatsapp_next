@@ -11,6 +11,20 @@ app_license = "mit"
 
 required_apps = ["frappe", "erpnext"]
 
+# The app's tile on the Desk desktop (Frappe v16 `Desktop Icon`, type App). The route stays under
+# /app: Frappe hides an app's workspace tiles when its route leaves Desk.
+app_home = "/app/wa-home"
+app_logo_url = "/assets/whatsapp_next/images/whatsapp-next-logo.svg"
+add_to_apps_screen = [
+	{
+		"name": app_name,
+		"logo": app_logo_url,
+		"title": app_title,
+		"route": app_home,
+		"has_permission": "whatsapp_next.install.has_app_permission",
+	}
+]
+
 # Provider registry (architecture.md) — nothing outside providers/ imports a provider module.
 whatsapp_providers = {
 	"snd_platform": "whatsapp_next.providers.snd_platform.SndPlatformProvider",
@@ -122,6 +136,12 @@ doctype_js = {
 	"WhatsApp Command": "public/js/form/whatsapp_command.js",
 	"WhatsApp Template": "public/js/form/whatsapp_template.js",
 	"WhatsApp Number": "public/js/form/whatsapp_number.js",
+	"WhatsApp Notification": "public/js/form/whatsapp_notification.js",
+	"WhatsApp Notification Alert": "public/js/form/whatsapp_notification_alert.js",
+	"WhatsApp Device": "public/js/form/whatsapp_device.js",
+	"WhatsApp Inbound Message": "public/js/form/whatsapp_inbound_message.js",
+	"WhatsApp Function": "public/js/form/whatsapp_function.js",
+	"WhatsApp Queue Item": "public/js/form/whatsapp_queue_item.js",
 }
 doctype_list_js = {
 	"WhatsApp Log": "public/js/listview/whatsapp_log_list.js",
@@ -134,6 +154,8 @@ doctype_list_js = {
 	"WhatsApp Template": "public/js/listview/whatsapp_template_list.js",
 	"WhatsApp Notification": "public/js/listview/whatsapp_notification_list.js",
 	"WhatsApp Notification Alert": "public/js/listview/whatsapp_notification_alert_list.js",
+	"WhatsApp Device": "public/js/listview/whatsapp_device_list.js",
+	"WhatsApp Function": "public/js/listview/whatsapp_function_list.js",
 }
 
 # Translation

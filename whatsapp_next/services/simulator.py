@@ -107,13 +107,26 @@ def simulate_inbound(
 	)
 
 
-def send_test(device: str, phone: str, body: str, user: str | None = None) -> str:
-	"""Create an `is_test` outbound and start `dispatch.send_test_message` (D-010, D-024)."""
-	if not (body or "").strip():
-		frappe.throw(_("Message text is required"), WAValidationError)
+def send_test(
+	device: str,
+	phone: str,
+	body: str | None = None,
+	user: str | None = None,
+	*,
+	kind: str | None = None,
+	attachment: str | None = None,
+	contact: str | None = None,
+	location: dict | None = None,
+) -> str:
+	"""Create an `is_test` outbound and start `dispatch.send_test_message` (D-010, D-024). `kind`
+	is what the composer's "+" picked (text · image · video · document · audio · location ·
+	contact, D-137); the typed text is a file's caption."""
+	from whatsapp_next.services.attachments import message_parts
+
+	parts = message_parts(kind, body=body, attachment=attachment, contact=contact, location=location)
 	outbound = dispatch.create_outbound(
 		OutboundSpec(
-			device=device, phone=phone, body=body, source_type="Simulator", is_test=True, skip_policy=True
+			device=device, phone=phone, source_type="Simulator", is_test=True, skip_policy=True, **parts
 		),
 		user=user,
 	)
@@ -128,7 +141,12 @@ def send_test(device: str, phone: str, body: str, user: str | None = None) -> st
 	)
 	from whatsapp_next.services import audit
 
-	audit.log("Test Send", reference=("WhatsApp Log", outbound), user=user, details={"device": device})
+	audit.log(
+		"Test Send",
+		reference=("WhatsApp Log", outbound),
+		user=user,
+		details={"device": device, "message_type": parts["message_type"]},
+	)
 	return outbound
 
 
@@ -145,7 +163,7 @@ def get_context() -> dict[str, Any]:
 	commands = frappe.get_all(
 		"WhatsApp Command",
 		filters={"status": "Active"},
-		fields=["name", "code", "title", "function", "description", "requires_linked_contact"],
+		fields=["name", "code", "title", "function", "synonyms", "description", "requires_linked_contact"],
 		order_by="code asc",
 	)
 	sample_contacts = frappe.get_all(
@@ -181,4 +199,145 @@ def dry_run_command(text: str, sender: str, device: str | None = None) -> dict[s
 		"replies": res.replies,
 		"error": res.error,
 		"function_ms": res.elapsed_ms,
+	}
+
+
+CONVERSATION_FIELDS: tuple[str, ...] = (
+	"name",
+	"phone_e164",
+	"display_name",
+	"contact",
+	"link_status",
+	"last_seen",
+	"last_direction",
+	"outbound_count",
+	"inbound_count",
+)
+
+
+def _last_message(doctype: str, phone: str) -> dict[str, Any] | None:
+	rows = frappe.get_all(
+		doctype,
+		filters={"phone_e164": phone},
+		fields=["body", "message_type", "creation"],
+		order_by="creation desc",
+		limit=1,
+	)
+	return rows[0] if rows else None
+
+
+def conversations(txt: str | None = None, limit: int = 30) -> dict[str, Any]:
+	"""The simulator's conversation list (the prototype's rail): individual numbers, newest first,
+	each with its party type (the contact's first account link: `Customer`, `Supplier`, …, `None`
+	for a contact with no account, absent for an unsaved number) and a one-line preview of the last
+	message either way. `{rows, total}`."""
+	from whatsapp_next.services.permissions import PARTY_TYPES
+
+	filters: list = [["number_type", "=", "Individual"]]
+	or_filters: dict[str, Any] = {}
+	if txt and txt.strip():
+		like = f"%{txt.strip()}%"
+		or_filters = {"phone_e164": ("like", like), "display_name": ("like", like)}
+	rows = frappe.get_all(
+		"WhatsApp Number",
+		filters=filters,
+		or_filters=or_filters,
+		fields=list(CONVERSATION_FIELDS),
+		order_by="last_seen desc, name asc",
+		limit=max(1, min(cint(limit) or 30, 100)),
+	)
+	total = len(frappe.get_all("WhatsApp Number", filters=filters, or_filters=or_filters, pluck="name"))
+	contacts = sorted({r.contact for r in rows if r.contact})
+	party: dict[str, str] = {}
+	if contacts:
+		for link in frappe.get_all(
+			"Dynamic Link",
+			filters={
+				"parenttype": "Contact",
+				"parent": ("in", contacts),
+				"link_doctype": ("in", list(PARTY_TYPES)),
+			},
+			fields=["parent", "link_doctype"],
+			order_by="idx asc",
+		):
+			party.setdefault(link.parent, link.link_doctype)
+	for r in rows:
+		r["party_type"] = party.get(r.contact) if r.contact else None
+		last_out = _last_message("WhatsApp Log", r.phone_e164)
+		last_in = _last_message("WhatsApp Inbound Message", r.phone_e164)
+		picks = [m for m in (last_out, last_in) if m]
+		last = max(picks, key=lambda m: m.creation) if picks else None
+		r["last_body"] = ((last.body or last.message_type or "") if last else "")[:120]
+		r["last_at"] = last.creation if last else r.last_seen
+	return {"rows": rows, "total": total}
+
+
+def identity(phone_e164: str) -> dict[str, Any]:
+	"""The simulator's "who is this" panel for one number: `{phone_e164, name, contact, party_type,
+	link_status, outbound_count, inbound_count, last_seen, accounts[{doctype, name, title}],
+	groups[{name, label, kind, member_count}]}` — the contact's own account links and the contact
+	groups the number is a member of. E: `WAInvalidPhoneError`."""
+	from whatsapp_next.services.permissions import PARTY_TYPES
+
+	kind, key = classify(phone_e164)
+	if kind != "Individual":
+		frappe.throw(_("Invalid phone number: {0}").format(phone_e164), WAInvalidPhoneError)
+	number = (
+		frappe.db.get_value(
+			"WhatsApp Number",
+			key,
+			["display_name", "contact", "link_status", "outbound_count", "inbound_count", "last_seen"],
+			as_dict=True,
+		)
+		or frappe._dict()
+	)
+	contact = number.contact or resolve_contact_by_phone(key)
+	accounts = (
+		frappe.get_all(
+			"Dynamic Link",
+			filters={"parenttype": "Contact", "parent": contact, "link_doctype": ("in", list(PARTY_TYPES))},
+			fields=["link_doctype", "link_name", "link_title"],
+			order_by="idx asc",
+		)
+		if contact
+		else []
+	)
+	memberships = frappe.get_all(
+		"WhatsApp Contact Group Member",
+		filters={"parenttype": "WhatsApp Contact Group", "phone_e164": key},
+		pluck="parent",
+	)
+	groups = (
+		frappe.get_all(
+			"WhatsApp Contact Group",
+			filters={"name": ("in", sorted(set(memberships)))},
+			fields=["name", "group_name", "kind", "member_count"],
+			order_by="group_name asc",
+		)
+		if memberships
+		else []
+	)
+	return {
+		"phone_e164": key,
+		"name": number.display_name
+		or (frappe.db.get_value("Contact", contact, "full_name") if contact else None),
+		"contact": contact,
+		"party_type": accounts[0].link_doctype if accounts else None,
+		"link_status": number.link_status or ("Linked" if contact else "Not Linked"),
+		"outbound_count": cint(number.outbound_count),
+		"inbound_count": cint(number.inbound_count),
+		"last_seen": number.last_seen,
+		"accounts": [
+			{"doctype": a.link_doctype, "name": a.link_name, "title": a.link_title or a.link_name}
+			for a in accounts
+		],
+		"groups": [
+			{
+				"name": g.name,
+				"label": g.group_name or g.name,
+				"kind": g.kind,
+				"member_count": cint(g.member_count),
+			}
+			for g in groups
+		],
 	}

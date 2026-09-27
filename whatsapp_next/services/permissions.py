@@ -86,6 +86,18 @@ MAX_PAGE_LENGTH = 200
 # --------------------------------------------------------------------------------------------
 
 
+def contact_open_to_all() -> list[str]:
+	"""The rights role `All` still holds on the core `Contact` DocType (level 0), in the effective
+	permissions (Custom DocPerm when the site customised them).
+
+	The contextual layer assumes a WhatsApp Contact User has no native Contact access, but Frappe
+	ships `Contact` with `All` read / write / create (R-028). Removing that row is the site
+	admin's step in the Role Permission Manager, never the app's (owner, D-125); this only
+	reports it, for the Settings banner and the install / migrate warning."""
+	rows = [p for p in frappe.get_meta("Contact").permissions if p.role == "All" and not cint(p.permlevel)]
+	return [ptype for ptype in ("read", "write", "create", "delete") if any(cint(p.get(ptype)) for p in rows)]
+
+
 def is_contact_user(user: str | None = None) -> bool:
 	"""True when the (session) user holds the contextual role."""
 	return ELEVATED_ROLE in frappe.get_roles(user or frappe.session.user)
@@ -868,6 +880,40 @@ def confirm_conversation(
 		user=user,
 	)
 	return bool(confirmed)
+
+
+def conversation_log(phone_e164: str, limit: int = 50) -> list[dict[str, Any]]:
+	"""The number's conversation-state history (09 G-06), newest first: `[{at, user, user_name,
+	confirmed, note}]` from its `Conversation Confirmed` audit rows. Only these columns — never the
+	IP address or the raw row — so a Contact User may read it. P: Contact read."""
+	require("read")
+	kind, key = classify(phone_e164)
+	if not kind or not frappe.db.exists("WhatsApp Number", key):
+		frappe.throw(_("WhatsApp Number {0} not found").format(phone_e164), WANotFoundError)
+	rows = frappe.get_all(
+		"WhatsApp Audit Log",
+		filters={"action": "Conversation Confirmed", "reference_doctype": "WhatsApp Number", "reference_name": key},
+		fields=["timestamp", "creation", "user", "reason", "details"],
+		order_by="creation desc",
+		limit=cint(limit) or 50,
+	)
+	names = {u: frappe.utils.get_fullname(u) for u in {r.user for r in rows if r.user}}
+	out = []
+	for r in rows:
+		try:
+			details = json.loads(r.details) if isinstance(r.details, str) else (r.details or {})
+		except ValueError:
+			details = {}
+		out.append(
+			{
+				"at": r.timestamp or r.creation,
+				"user": r.user,
+				"user_name": names.get(r.user) or r.user,
+				"confirmed": bool(details.get("confirmed")),
+				"note": r.reason,
+			}
+		)
+	return out
 
 
 def toggle_blacklist(key: str, blocked: bool, note: str | None = None, user: str | None = None) -> bool:

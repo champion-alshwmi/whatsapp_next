@@ -15,6 +15,7 @@ EXPECTED: dict[str, dict[str, str | tuple[str, str]]] = {
 		"platform_base_url": "Data",
 		"request_timeout": "Int",
 		"customer_api_key": "Password",
+		"customer_api_secret": "Password",
 		"api_key": "Password",
 		"api_secret": "Password",
 		"webhook_secret": "Password",
@@ -345,7 +346,7 @@ class TestFieldsGroupA(IntegrationTestCase):
 					self.assertEqual(df.options, options, f"{doctype}.{fieldname} options")
 
 	def test_no_unplanned_value_fields(self) -> None:
-		layout = {"Section Break", "Column Break", "Tab Break"}
+		layout = {"Section Break", "Column Break", "Tab Break", "HTML"}  # HTML: display only, no value
 		for doctype, fields in EXPECTED.items():
 			meta = frappe.get_meta(doctype)
 			actual = {df.fieldname for df in meta.fields if df.fieldtype not in layout}
@@ -380,5 +381,11 @@ class TestFieldsGroupA(IntegrationTestCase):
 		self.assertEqual(frappe.get_meta("WhatsApp Number").allow_rename or 0, 0)
 		self.assertEqual(
 			frappe.get_meta("WhatsApp Settings").get_field("webhook_endpoint_url").description,
-			"`https://{site}/api/method/whatsapp_next.webhooks.v1.receiver.receive` (D-031)",
+			"The address on this site where the platform sends messages and status updates.",
 		)
+		# The receiver is the versioned path (backend F-02, D-031), and it is a real guest method.
+		from whatsapp_next.services import webhook_setup
+		from whatsapp_next.webhooks.v1 import receiver
+
+		self.assertEqual(webhook_setup.RECEIVER_METHOD, "whatsapp_next.webhooks.v1.receiver.receive")
+		self.assertIn(receiver.receive, frappe.guest_methods)

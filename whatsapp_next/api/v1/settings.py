@@ -17,7 +17,9 @@ from whatsapp_next.api._common import api_endpoint, paginate
 from whatsapp_next.api.v1._roles import AGENT_UP, CONTACT_USER, MANAGER, SYSTEM_MANAGER, VIEWER_UP
 from whatsapp_next.exceptions import WANotSupportedError, WAProviderUnavailableError, WAValidationError
 from whatsapp_next.providers.schemas import CANONICAL_EVENTS
-from whatsapp_next.services import audit, onboarding, usage_sync, webhook_setup
+from whatsapp_next.services import audit, onboarding, permissions, usage_sync, webhook_setup
+from whatsapp_next.services import settings as settings_service
+from whatsapp_next.services.settings import PICKER_SOURCE_FIELDS
 
 SETTINGS = "WhatsApp Settings"
 
@@ -90,20 +92,10 @@ WRITABLE: dict[str, tuple[str, ...]] = {
 
 # Password fields exposed as `has_<field>` booleans (section they belong to).
 SECRET_FIELDS: dict[str, tuple[str, ...]] = {
-	"credentials": ("customer_api_key", "api_key", "api_secret"),
+	"credentials": ("customer_api_key", "customer_api_secret", "api_key", "api_secret"),
 	"webhook": ("webhook_secret",),
 }
 
-PICKER_SOURCE_FIELDS = (
-	"document_type",
-	"label",
-	"phone_source",
-	"phone_fieldname",
-	"contact_fieldname",
-	"name_fieldname",
-	"filters_json",
-	"enabled",
-)
 DOCTYPE_FIELD_TYPES = ("Data", "Phone", "Link", "Dynamic Link", "Small Text")
 AUDIT_FIELDS = (
 	"name",
@@ -135,6 +127,8 @@ def _section_values(doc, section: str) -> dict[str, Any]:
 		out[fieldname] = value
 	for fieldname in SECRET_FIELDS.get(section, ()):
 		out[f"has_{fieldname}"] = onboarding.has_secret(doc, fieldname)
+	if section == "policy":
+		out.update(_policy_extras())
 	return out
 
 
@@ -148,6 +142,11 @@ def get_settings(section: str | None = None) -> dict[str, Any]:
 	return {s: _section_values(doc, s) for s in SECTIONS}
 
 
+def _policy_extras() -> dict[str, Any]:
+	"""Computed, read-only: what role `All` can still do on `Contact` (R-028, D-125)."""
+	return {"contact_open_to_all": permissions.contact_open_to_all()}
+
+
 @api_endpoint(roles=SYSTEM_MANAGER, schema={"section": {"enum": list(WRITABLE)}})
 def save_settings(section: str, values: dict) -> dict[str, Any]:
 	"""Write the given fields of one section (fieldnames validated against the section's
@@ -158,28 +157,7 @@ def save_settings(section: str, values: dict) -> dict[str, Any]:
 		frappe.throw(
 			_("Fields not allowed in section {0}: {1}").format(section, ", ".join(unknown)), WAValidationError
 		)
-	if not values:
-		frappe.throw(_("Nothing to save"), WAValidationError)
-	doc = frappe.get_doc(SETTINGS)
-	changed: list[str] = []
-	for fieldname, value in values.items():
-		if fieldname == "picker_sources":
-			if not isinstance(value, list):
-				frappe.throw(_("picker_sources must be a list of rows"), WAValidationError)
-			doc.set("picker_sources", [])
-			for row in value:
-				doc.append(
-					"picker_sources", {f: row.get(f) for f in PICKER_SOURCE_FIELDS if f in (row or {})}
-				)
-			changed.append(fieldname)
-			continue
-		if doc.get(fieldname) != value:
-			doc.set(fieldname, value)
-			changed.append(fieldname)
-	if changed:
-		doc.flags.ignore_permissions = True
-		doc.save(ignore_permissions=True)
-		audit.log("Settings Changed", fields_written=changed, details={"section": section})
+	changed = settings_service.save_fields(values, section=section, user=frappe.session.user)
 	return {"ok": True, "changed": changed}
 
 
@@ -220,6 +198,17 @@ def get_usage(from_date: date, to_date: date, group_by: str = "day") -> dict[str
 	}
 	frappe.cache.set_value(key, out, expires_in_sec=USAGE_CACHE_SECONDS)
 	return out
+
+
+@api_endpoint(roles=VIEWER_UP, methods=("GET", "POST"))
+def get_site_usage(from_date: date, to_date: date) -> dict[str, Any]:
+	"""Messages this site sent per day — sent, delivered, read, failed — from its own outbound
+	log, every day of the period included. Always available, unlike the provider's report."""
+	if from_date > to_date:
+		frappe.throw(_("from_date must not be after to_date"), WAValidationError)
+	if (to_date - from_date).days >= usage_sync.SITE_MAX_DAYS:
+		frappe.throw(_("A usage period is at most {0} days").format(usage_sync.SITE_MAX_DAYS), WAValidationError)
+	return {"rows": usage_sync.site_daily(from_date, to_date), "from": str(from_date), "to": str(to_date)}
 
 
 def _endpoint(summary: webhook_setup.EndpointSummary) -> dict[str, Any]:

@@ -130,6 +130,10 @@ $wa-surfaces:
 	"#page-wa-simulator",
 	'body[data-route^="Form/WhatsApp "] .page-container',
 	".modal.sanad-sheet",
+	// the settings window (D-138) mounts on <body> too
+	".sanad-sw.wa-settings-window",
+	// the alert editor (D-139) mounts on <body>
+	".sanad-ae-layer",
 	// the prototype's overlay panel mounts on <body>, outside every page, and is always ours
 	".sanad-op";
 
@@ -214,6 +218,6 @@ $wa-bridge: ();
 	--awesomplete-hover-bg: var(--wa-pri-s);
 	--btn-primary-bg: var(--wa-pri);
 	--fg-color: var(--wa-surface);
-	--bg-color: var(--wa-bg);
+	// the page background stays Frappe's own (owner, 2026-09-27): no --bg-color here
 	--card-bg: var(--wa-surface);
 }

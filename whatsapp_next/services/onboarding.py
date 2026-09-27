@@ -22,7 +22,10 @@ from whatsapp_next.providers.schemas import SignupState
 from whatsapp_next.services import audit, usage_sync, webhook_setup
 from whatsapp_next.services.phone import normalize
 
-CREDENTIAL_FIELDS: tuple[str, ...] = ("customer_api_key", "api_key", "api_secret")
+# What sign-in / sign-up hand back and Settings stores; the first three are required to call the
+# platform at all, `customer_api_secret` whenever the link requires the secret header (D-129).
+CREDENTIAL_FIELDS: tuple[str, ...] = ("customer_api_key", "customer_api_secret", "api_key", "api_secret")
+REQUIRED_CREDENTIALS: tuple[str, ...] = ("customer_api_key", "api_key", "api_secret")
 STEP_KEYS: tuple[str, ...] = ("credentials", "connection", "device", "webhook")
 
 
@@ -46,9 +49,11 @@ def has_secret(settings, fieldname: str) -> bool:
 
 
 def has_credentials(settings=None) -> bool:
-	"""All three platform credentials plus the base URL are present."""
+	"""All three platform credentials are present and the site knows its platform address — the
+	effective one (Settings, else the bench default `whatsapp_platform_base_url`, D-103): the
+	address is a default, never copied into Settings (D-117)."""
 	s = settings or _settings()
-	return bool(s.platform_base_url) and all(has_secret(s, f) for f in CREDENTIAL_FIELDS)
+	return bool(registry.platform_base_url(s)) and all(has_secret(s, f) for f in REQUIRED_CREDENTIALS)
 
 
 def test_connection(user: str | None = None) -> dict[str, Any]:
@@ -89,6 +94,7 @@ def save_credentials(
 	api_key: str | None = None,
 	api_secret: str | None = None,
 	user: str | None = None,
+	customer_api_secret: str | None = None,
 ) -> list[str]:
 	"""Store the platform credentials with `set_password` (values never logged or returned) and
 	the base URL (validated by the Settings controller). Returns the fieldnames written."""
@@ -99,6 +105,7 @@ def save_credentials(
 		written.append("platform_base_url")
 	for fieldname, value in (
 		("customer_api_key", customer_api_key),
+		("customer_api_secret", customer_api_secret),
 		("api_key", api_key),
 		("api_secret", api_secret),
 	):
@@ -197,7 +204,10 @@ def complete_signup(
 	account real on the platform."""
 	state = registry.get_provider().complete_signup(request_key, code or "", password=password)
 	stored = store_signup_credentials(state, user=user)
-	return {"ok": state.status == "Completed", "status": state.status, "credentials_stored": stored}
+	out = {"ok": state.status == "Completed", "status": state.status, "credentials_stored": stored}
+	if stored:
+		out.update(link_site(user=user))
+	return out
 
 
 def start_password_reset(identifier: str) -> SignupState:
@@ -249,7 +259,40 @@ def login(platform_base_url: str, email: str, password: str, user: str | None = 
 		"customer": result.get("customer"),
 		"customer_name": result.get("customer_name"),
 		"credentials_stored": bool(written),
+		**link_site(user=user),
 	}
+
+
+def link_site(user: str | None = None) -> dict[str, Any]:
+	"""Everything that follows once the platform handed this site its keys (sign-in or sign-up):
+	test the connection, register this site's webhook endpoint (which stores its signing secret),
+	and bring the account's existing devices in. Each step is reported, none raises, so a
+	half-linked site still signs in and the Settings page offers the step that failed.
+
+	`{connection{ok, error}, webhook{ok, status, error}, devices{ok, adopted, error}}`."""
+	connection = test_connection(user=user)
+	out: dict[str, Any] = {"connection": {"ok": connection["ok"], "error": connection.get("error")}}
+	if not connection["ok"]:
+		return out
+	try:
+		endpoint = webhook_setup.ensure_endpoint(user=user, refresh_secret=True)
+		out["webhook"] = {"ok": endpoint.status == "Active", "status": endpoint.status}
+	except Exception as exc:
+		frappe.log_error(title="WhatsApp onboarding: webhook registration failed")
+		out["webhook"] = {"ok": False, "status": None, "error": _step_error(exc)}
+	from whatsapp_next.services import devices
+
+	try:
+		counts = devices.adopt_from_provider(user=user)
+		out["devices"] = {"ok": True, "adopted": counts["adopted"]}
+	except Exception as exc:
+		frappe.log_error(title="WhatsApp onboarding: device import failed")
+		out["devices"] = {"ok": False, "adopted": 0, "error": _step_error(exc)}
+	return out
+
+
+def _step_error(exc: Exception) -> str:
+	return (str(exc) if isinstance(exc, (pex.ProviderError, frappe.ValidationError)) else "") or exc.__class__.__name__
 
 
 def validate_coupon(code: str, email: str | None = None, mobile: str | None = None) -> dict[str, Any]:

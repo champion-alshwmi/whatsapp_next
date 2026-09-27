@@ -45,6 +45,7 @@ from whatsapp_next.providers.schemas import (
 	UsageReport,
 	UsageRow,
 	WebhookEndpointState,
+	WebhookEnvelope,
 	WebhookEvent,
 )
 
@@ -172,8 +173,9 @@ class SndPlatformProvider(BaseProvider):
 			headers["X-SND-API-Key"] = creds["customer_api_key"]
 		if creds.get("api_key") and creds.get("api_secret"):
 			headers["Authorization"] = f"token {creds['api_key']}:{creds['api_secret']}"
-		if creds.get("api_secret"):
-			headers["X-SND-API-Secret"] = creds["api_secret"]
+		# the integration's own secret (D-129): a factor of its own, not the user's token secret
+		if creds.get("customer_api_secret"):
+			headers["X-SND-API-Secret"] = creds["customer_api_secret"]
 		return headers
 
 	def _url(self, endpoint: str, *, v1: bool = False) -> str:
@@ -495,8 +497,8 @@ class SndPlatformProvider(BaseProvider):
 		"""Exchange an e-mail and password for this tenant's credentials.
 
 		Returns the platform's answer unchanged: `{ok, customer, customer_name,
-		integration_link, api_base_url, credentials{customer_api_key, api_key,
-		api_secret}}`. The caller stores `credentials` and never returns them.
+		integration_link, api_base_url, credentials{customer_api_key, customer_api_secret,
+		api_key, api_secret}}`. The caller stores `credentials` and never returns them.
 		"""
 		return self._request(
 			"POST", "login_with_password", v1=True, guest=True, body={"email": email, "password": password}
@@ -642,6 +644,18 @@ class SndPlatformProvider(BaseProvider):
 		)
 
 	# ------------------------------------------------------------------ sending
+	# The platform's Message Log takes its own source vocabulary; ours is finer. Unknown → External API.
+	PLATFORM_SOURCE_TYPES: dict[str, str] = {
+		"Quick Send": "Manual",
+		"Form": "SANAD ERPNext",
+		"Campaign": "Campaign",
+		"Notification": "SANAD ERPNext",
+		"Notification Alert": "Scheduled Message",
+		"Command Reply": "External API",
+		"Simulator": "Simulator",
+		"API": "External API",
+	}
+
 	def _message_payload(self, message: NormalizedMessage) -> dict[str, Any]:
 		"""`NormalizedMessage` → platform keys (only `_PAYLOAD_KEYS` + `client_ref`, `priority`)."""
 		payload: dict[str, Any] = {
@@ -650,7 +664,7 @@ class SndPlatformProvider(BaseProvider):
 			"priority": message.priority,
 			"recipient_type": message.recipient_type,
 			"message_type": message.message_type,
-			"source_type": message.source.type,
+			"source_type": self.PLATFORM_SOURCE_TYPES.get(message.source.type or "", "External API"),
 			"source_site": message.source.site,
 			"source_doctype": message.source.doctype,
 			"source_docname": message.source.docname,
@@ -861,6 +875,17 @@ class SndPlatformProvider(BaseProvider):
 		reason = None if valid and fresh else ("stale" if valid else "signature")
 		return SignatureCheck(valid=valid, fresh=fresh, event_timestamp=event_ts, reason=reason)
 
+	def webhook_envelope(self, headers: Mapping[str, str]) -> WebhookEnvelope:
+		h = _ci_headers(headers)
+		return WebhookEnvelope(
+			event_id=h.get(HEADER_EVENT_ID.lower()) or None,
+			event_name=h.get(HEADER_EVENT.lower()) or None,
+			signed=bool(h.get(HEADER_SIGNATURE.lower())),
+		)
+
+	def replay_headers(self, event_name: str, event_id: str | None) -> dict[str, str]:
+		return {HEADER_EVENT: event_name or "", HEADER_EVENT_ID: event_id or ""}
+
 	def parse_webhook(self, headers: Mapping[str, str], body: dict) -> WebhookEvent:
 		"""Platform payload + headers → `WebhookEvent` (pure). Unknown events keep their name."""
 		h = _ci_headers(headers)
@@ -934,10 +959,15 @@ class SndPlatformProvider(BaseProvider):
 	def configure_webhook(
 		self, endpoint_url: str, events: list[str], max_retries: int
 	) -> WebhookEndpointState:
-		"""Register the receiver URL on the link, then create the events endpoint (never passes `secret`)."""
+		"""Register the receiver URL on the link, then create the events endpoint (never passes `secret`).
+
+		Registering the URL makes the platform create the link's endpoint subscribed to the
+		`connection.*` events only; that endpoint is reused and given the events asked for."""
 		self._request("POST", "configure_integration_webhook_api", body={"endpoint_url": endpoint_url})
 		for state in self.list_webhook_endpoints():
 			if state.url == endpoint_url and state.status != "Revoked":
+				if set(state.events) != set(events):
+					return self.update_webhook_endpoint(state.endpoint_id, None, list(events), None)
 				return state
 		data = self._request(
 			"POST",

@@ -11,6 +11,7 @@ Dev sites only — it writes real documents. Run it from the bench:
     cp apps/whatsapp_next/scripts/seed_demo_functions.py apps/whatsapp_next/whatsapp_next/_seed_f.py
     bench --site whatsapp.dev.sanad.digital execute whatsapp_next._seed_f.run
     bench --site whatsapp.dev.sanad.digital execute whatsapp_next._seed_f.clear   # to undo
+    bench --site whatsapp.dev.sanad.digital execute whatsapp_next._seed_f.enable_commands  # after a test run
     rm apps/whatsapp_next/whatsapp_next/_seed_f.py
 
 Every inbound row it creates carries `DEMOF-` in `provider_message_id` and every command it
@@ -57,7 +58,11 @@ ARGS = ["SINV-2026-00012", "SINV-2026-00031", "SO-2026-00107", "SINV-2026-00044"
 
 
 def _device():
-	rows = [d.name for d in frappe.get_all("WhatsApp Device", fields=["name"], limit=1)]
+	# a demo device first: a test fixture device (and every row on it) is deleted by its own test
+	rows = [
+		d.name
+		for d in frappe.get_all("WhatsApp Device", filters={"device_name": ("like", "DEMO%")}, fields=["name"], limit=1)
+	] or [d.name for d in frappe.get_all("WhatsApp Device", fields=["name"], limit=1)]
 	if not rows:
 		frappe.throw("Seed a WhatsApp Device first.")
 	return rows[0]
@@ -105,10 +110,27 @@ def _inbound(i: int, device: str, command: str, when) -> None:
 	doc.insert(ignore_permissions=True)
 
 
+def enable_commands() -> str:
+	"""Turn commands on with the service user the install seeded (owner, Gate 2: "فعّل مستخدم
+	خدمة الأوامر"). It is enabled with no roles — the catalog functions read through
+	`frappe.db`, and Settings refuses Administrator or a System Manager (D-012)."""
+	from whatsapp_next.install import ensure_command_service_user
+
+	email = frappe.db.get_single_value("WhatsApp Settings", "command_service_user") or ensure_command_service_user()
+	frappe.db.set_value("User", email, "enabled", 1)
+	settings = frappe.get_single("WhatsApp Settings")
+	settings.command_service_user = email
+	settings.enable_commands = 1
+	settings.flags.ignore_permissions = True
+	settings.save(ignore_permissions=True)
+	return email
+
+
 def run(days: int = 30):
 	"""Install and activate both catalog functions, bind three commands, seed a month of runs."""
 	frappe.flags.wa_system_writer = True
 	functions_catalog.clear_cache()
+	enable_commands()
 	device = _device()
 	for key in FUNCTIONS:
 		_install(key)

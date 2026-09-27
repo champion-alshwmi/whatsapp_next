@@ -5,6 +5,7 @@
  "engine": "InnoDB",
  "row_format": "Dynamic",
  "field_order": [
+  "group_tab",
   "group_section",
   "group_name",
   "kind",
@@ -18,6 +19,11 @@
   "members"
  ],
  "fields": [
+  {
+   "fieldname": "group_tab",
+   "fieldtype": "Tab Break",
+   "label": "Group"
+  },
   {
    "fieldname": "group_section",
    "fieldtype": "Section Break"
@@ -60,7 +66,7 @@
    "default": "Manual",
    "in_list_view": 1,
    "in_standard_filter": 1,
-   "description": "Last bulk source used"
+   "description": "How members were last added."
   },
   {
    "fieldname": "member_count",
@@ -68,8 +74,7 @@
    "fieldtype": "Int",
    "default": "0",
    "in_list_view": 1,
-   "read_only": 1,
-   "description": "Maintained on member insert/delete"
+   "read_only": 1
   },
   {
    "fieldname": "members_changed_at",
@@ -84,11 +89,11 @@
    "default": "0",
    "in_standard_filter": 1,
    "search_index": 1,
-   "description": "Disabled groups are not offered in the picker"
+   "description": "Disabled groups are not offered when choosing recipients."
   },
   {
    "fieldname": "members_section",
-   "fieldtype": "Section Break",
+   "fieldtype": "Tab Break",
    "label": "Members"
   },
   {
@@ -98,8 +103,19 @@
    "options": "WhatsApp Contact Group Member"
   }
  ],
- "links": [],
- "modified": "2026-09-22 00:00:00.000000",
+ "links": [
+  {
+   "group": "Commands",
+   "link_doctype": "WhatsApp Command",
+   "link_fieldname": "allowed_group"
+  },
+  {
+   "group": "Commands",
+   "link_doctype": "WhatsApp Command",
+   "link_fieldname": "blocked_group"
+  }
+ ],
+ "modified": "2026-09-27 13:00:00.000000",
  "modified_by": "Administrator",
  "module": "WhatsApp Next",
  "name": "WhatsApp Contact Group",

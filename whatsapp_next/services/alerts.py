@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -20,6 +21,8 @@ from whatsapp_next.services.dispatch import OutboundSpec
 from whatsapp_next.services.phone import normalize
 
 MAX_COLUMN_RECIPIENTS = 200
+MAX_BUILDER_ROWS = 1000
+PNG_BINARY = "wkhtmltoimage"
 
 
 @dataclass
@@ -185,9 +188,60 @@ def _rows_for(recipient: Recipient, rows: list[Any], columns: list[Any], column:
 # ---- run ---------------------------------------------------------------------------------
 
 
+def report_kind(report: str | None) -> frappe._dict | None:
+	"""`{report_type, ref_doctype, json}` of a Report, or None."""
+	if not report:
+		return None
+	return frappe.db.get_value("Report", report, ["report_type", "ref_doctype", "json"], as_dict=True)
+
+
+def builder_filters(alert, saved: Any = None) -> list[list[Any]]:
+	"""A Report Builder alert's filters as Frappe list filters `[doctype, field, operator, value]`:
+	the alert's own `filters_json` when it is a list (Frappe's filter component writes that — moving
+	dates are its own `Timespan` operator), else the report's saved filters."""
+	own = _load_json(getattr(alert, "filters_json", None))
+	rows = own if isinstance(own, list) else (saved or [])
+	return [list(f[:4]) for f in rows if isinstance(f, list | tuple) and len(f) >= 4]
+
+
+def _run_report_builder(kind, alert) -> tuple[list[Any], list[Any]]:
+	"""A Report Builder report is a saved list of one DocType: run it with `frappe.get_list`, so the
+	caller's permissions apply; its own columns of that DocType, at most MAX_BUILDER_ROWS rows."""
+	data = _load_json(kind.json) or {}
+	doctype = kind.ref_doctype
+	meta = frappe.get_meta(doctype)
+	fields = [c[0] for c in data.get("columns") or [] if isinstance(c, list | tuple) and len(c) >= 2 and c[1] == doctype]
+	fields = [f for f in fields if f == "name" or meta.get_field(f) or f in frappe.model.default_fields] or ["name"]
+	order_by = data.get("order_by") or "modified desc"
+	if isinstance(order_by, dict):
+		order_by = f"{order_by.get('order_by', 'modified')} {order_by.get('sort_order', 'desc')}"
+	rows = frappe.get_list(
+		doctype,
+		fields=fields,
+		filters=builder_filters(alert, data.get("filters")),
+		order_by=order_by,
+		limit_page_length=MAX_BUILDER_ROWS,
+	)
+	columns = []
+	for f in fields:
+		df = meta.get_field(f)
+		columns.append(
+			{
+				"fieldname": f,
+				"label": _(df.label) if df else (_("ID") if f == "name" else _(frappe.unscrub(f))),
+				"fieldtype": df.fieldtype if df else "Data",
+				"options": df.options if df else None,
+			}
+		)
+	return columns, [dict(r) for r in rows]
+
+
 def _run_report(alert, filters: dict[str, Any]) -> tuple[list[Any], list[Any]]:
 	from frappe.desk.query_report import run
 
+	kind = report_kind(alert.report)
+	if kind and kind.report_type == "Report Builder":
+		return _run_report_builder(kind, alert)
 	result = run(alert.report, filters=filters, ignore_prepared_report=True)
 	return list(result.get("columns") or []), list(result.get("result") or [])
 
@@ -196,7 +250,25 @@ def run_alert(name: str, *, preview: bool = False) -> AlertRun:
 	"""Job (`long`, `wa-alert-{name}`): execute, render, attach, send. `preview=True` renders
 	everything and returns it without creating outbound rows or touching counters."""
 	alert = frappe.get_doc("WhatsApp Notification Alert", name)
-	run = AlertRun(alert=name, preview=preview)
+	run = execute(alert, preview=preview)
+	if not preview:
+		run.next_run_at = alert.compute_next_run()
+		values: dict[str, Any] = {"next_run_at": run.next_run_at, "last_error": run.error}
+		if run.outbound:
+			values.update(
+				{"send_count": cint(alert.send_count) + len(run.outbound), "last_sent_at": now_datetime()}
+			)
+		frappe.db.set_value("WhatsApp Notification Alert", name, values, update_modified=False)
+	return run
+
+
+def execute(alert, *, preview: bool = False, test_phone: str | None = None) -> AlertRun:
+	"""Run one alert document — saved or a draft the editor built — and return what it did.
+	`preview` renders everything without creating outbound rows. `test_phone` sends to that one
+	number only, what the first recipient would receive (their rows, when the recipient is a report
+	column). Never touches the alert's counters; `run_alert` does that for a scheduled run."""
+	name = alert.name if not alert.is_new() else None
+	run = AlertRun(alert=name or alert.alert_name, preview=preview)
 	try:
 		filters = resolve_filters(alert)
 		columns: list[Any] = []
@@ -205,6 +277,13 @@ def run_alert(name: str, *, preview: bool = False) -> AlertRun:
 			columns, rows = _run_report(alert, filters)
 		run.rows, run.columns = len(rows), len(columns)
 		recipients = expand_recipients(alert, rows, columns)
+		if test_phone:
+			first = recipients[0] if recipients else Recipient(phone_e164=test_phone)
+			recipients = [
+				Recipient(phone_e164=test_phone, source="Test", column_value=first.column_value)
+			]
+			if first.source == "Report Column":
+				recipients[0].source = "Report Column"
 		column = next(
 			(r.report_column for r in alert.get("recipients") or [] if r.recipient_type == "Report Column"),
 			None,
@@ -230,7 +309,15 @@ def run_alert(name: str, *, preview: bool = False) -> AlertRun:
 			rendered = templates.render(source, ctx)
 			body = rendered.text if rendered.ok else _("Report {0}").format(alert.report or alert.alert_name)
 			attach: dict[str, Any] = {"message_type": "Text"}
-			if alert.content_type == "Report" and alert.attachment_format in ("PDF", "PNG"):
+			if preview and alert.content_type == "Report" and alert.attachment_format in ("PDF", "PNG"):
+				# a preview names the file it would attach; building it is the run's job
+				png = alert.attachment_format == "PNG" and bool(shutil.which(PNG_BINARY))
+				attach = {
+					"message_type": "Image" if png else "Document",
+					"file_name": f"{frappe.scrub(alert.alert_name or 'alert')}.{'png' if png else 'pdf'}",
+					"mime_type": "image/png" if png else "application/pdf",
+				}
+			elif alert.content_type == "Report" and alert.attachment_format in ("PDF", "PNG"):
 				html_text = report_render.report_html(columns, r_rows, alert, filters=filters)
 				content = report_render.report_png(html_text) if alert.attachment_format == "PNG" else None
 				if content:
@@ -251,7 +338,7 @@ def run_alert(name: str, *, preview: bool = False) -> AlertRun:
 					}
 				else:
 					url = attachments.save_private_file(
-						content, file_name, ("WhatsApp Notification Alert", name)
+						content, file_name, ("WhatsApp Notification Alert", name) if name else None
 					)
 					attach = {
 						"message_type": mtype,
@@ -291,27 +378,24 @@ def run_alert(name: str, *, preview: bool = False) -> AlertRun:
 	except Exception as exc:
 		run.error = f"{type(exc).__name__}: {str(exc)[:300]}"
 		frappe.log_error(title="WhatsApp alert failed", message=f"alert={name} {type(exc).__name__}")
-	if not preview:
-		run.next_run_at = alert.compute_next_run()
-		values: dict[str, Any] = {"next_run_at": run.next_run_at, "last_error": run.error}
-		if run.outbound:
-			values.update(
-				{"send_count": cint(alert.send_count) + len(run.outbound), "last_sent_at": now_datetime()}
-			)
-		frappe.db.set_value("WhatsApp Notification Alert", name, values, update_modified=False)
 	return run
 
 
-def report_columns(report: str, filters: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+def report_columns(report: str, filters: dict[str, Any] | list | None = None) -> list[dict[str, Any]]:
 	"""Column choices for the Report Column recipient type (runs the report with `filters`, or
 	none); an unrunnable report yields an empty list."""
 	from frappe.desk.query_report import run
 
 	try:
-		result = run(report, filters=filters or {}, ignore_prepared_report=True)
+		kind = report_kind(report)
+		if kind and kind.report_type == "Report Builder":
+			draft = frappe._dict(filters_json=filters if isinstance(filters, list) else None)
+			columns, _rows = _run_report_builder(kind, draft)
+		else:
+			columns = run(report, filters=filters or {}, ignore_prepared_report=True).get("columns") or []
 	except Exception:
 		return []
 	return [
 		{"fieldname": c["fieldname"], "label": c["label"], "fieldtype": c["fieldtype"]}
-		for c in report_render.normalize_columns(result.get("columns") or [])
+		for c in report_render.normalize_columns(columns)
 	]

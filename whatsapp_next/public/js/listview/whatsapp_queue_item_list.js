@@ -39,6 +39,7 @@
 		{ label: __("Pause"), icon: "es-line-time", condition: () => is_manager() && doc.status === "Queued", handler: () => run("queue.pause_items", { names: [doc.name] }, __("Message paused"), refresh) },
 		{ label: __("Resume"), icon: "es-line-zap", condition: () => is_manager() && doc.status === "Paused", handler: () => run("queue.resume_items", { names: [doc.name] }, __("Message resumed"), refresh) },
 		{ label: __("Retry"), icon: ui.icons.resend, condition: () => is_manager() && doc.status === "Dead Letter", handler: () => run("queue.retry_dead_letter", { names: [doc.name] }, __("Message re-queued"), refresh) },
+		{ label: __("Cancel this message"), icon: ui.icons.cancel, danger: true, condition: () => is_manager() && ["Queued", "Paused", "Dead Letter"].includes(doc.status), handler: () => whatsapp_next.queue.cancel_item(doc, refresh) },
 	];
 
 	const open_drawer = (doc, refresh, listview) => {
@@ -375,7 +376,7 @@
 					</div>
 				</section>`);
 
-			$el.find("[data-go=billing]").on("click", () => frappe.set_route("wa-settings", { tab: "billing" }));
+			$el.find("[data-go=billing]").on("click", () => whatsapp_next.settings.open("subscription"));
 			$el.find("[data-status]").on("click", function () {
 				const status = $(this).data("status");
 				const on = $(this).attr("aria-pressed") === "true";

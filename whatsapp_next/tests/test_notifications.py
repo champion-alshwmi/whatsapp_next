@@ -11,7 +11,13 @@ from frappe.tests import IntegrationTestCase
 from frappe.utils import add_days, nowdate
 
 from whatsapp_next.services import notifications as svc
-from whatsapp_next.tests.conftest_frappe import delete_all, ensure_contact, ensure_device, ensure_settings
+from whatsapp_next.tests.conftest_frappe import (
+	delete_all,
+	delete_test_rows,
+	ensure_contact,
+	ensure_device,
+	ensure_settings,
+)
 
 PHONE = "+966500000901"
 NAME = "NotifTest ToDo"
@@ -50,8 +56,8 @@ class TestNotifications(IntegrationTestCase):
 
 	@staticmethod
 	def _clean():
-		delete_all("WhatsApp Queue Item")
-		delete_all("WhatsApp Log", {"source_type": "Notification"})
+		delete_test_rows("WhatsApp Queue Item")
+		delete_test_rows("WhatsApp Log", {"source_type": "Notification"})
 		delete_all("WhatsApp Notification", {"notification_name": ("like", "NotifTest%")})
 		delete_all("ToDo", {"description": ("like", "notif-test%")})
 		svc.clear_cache()
@@ -73,7 +79,8 @@ class TestNotifications(IntegrationTestCase):
 		self.assertEqual(len(calls), 1)  # after_insert only; the on_update of the insert does not fire "New"
 		self.assertEqual(calls[0].kwargs["event"], "New")
 		self.assertTrue(calls[0].kwargs["enqueue_after_commit"])
-		# Save fires on update, not on insert
+		# Save fires on update, not on insert (reload: the document may have been touched since)
+		notif.reload()
 		notif.event = "Save"
 		notif.save(ignore_permissions=True)
 		with patch.object(frappe, "enqueue") as enq:
@@ -81,6 +88,7 @@ class TestNotifications(IntegrationTestCase):
 			todo.save(ignore_permissions=True)
 		self.assertEqual(len([c for c in enq.call_args_list if c.kwargs.get("event") == "Save"]), 1)
 		# a failing condition never blocks the document, and is recorded
+		notif.reload()
 		notif.condition = "doc.nonexistent.attr > 1"
 		notif.save(ignore_permissions=True)
 		with patch.object(frappe, "enqueue") as enq:

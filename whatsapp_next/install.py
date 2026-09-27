@@ -22,6 +22,65 @@ def after_install() -> None:
 	ensure_command_service_user()
 	ensure_settings_defaults()
 	add_indexes()
+	warn_contact_open_to_all()
+	ensure_desktop_icons()
+
+
+def has_app_permission() -> bool:
+	"""The desktop tile is for people who can use the product: a WhatsApp role or System Manager."""
+	if frappe.session.user == "Administrator":
+		return True
+	roles = set(frappe.get_roles())
+	return bool(roles & {*PRODUCT_ROLES, "System Manager"})
+
+
+def ensure_desktop_icons() -> None:
+	"""The app's desktop tile (from `add_to_apps_screen`) and the WhatsApp workspace's tile inside
+	it. Frappe creates both only at install time, so a site that installed the app before the hook
+	existed gets them here. Idempotent; an icon the admin already has is left alone."""
+	if not frappe.db.table_exists("Desktop Icon"):
+		return
+	try:
+		from frappe.desk.doctype.desktop_icon.desktop_icon import get_app_desktop_icon
+
+		app_icon = get_app_desktop_icon("whatsapp_next")
+		details = (frappe.get_hooks("add_to_apps_screen", app_name="whatsapp_next") or [None])[0]
+		title = frappe.get_hooks("app_title", app_name="whatsapp_next")[0]
+		# only this app's tile — Frappe's own install-time pass over every app is not ours to rerun
+		if not app_icon and details and not frappe.db.exists("Desktop Icon", title):
+			icon = frappe.new_doc("Desktop Icon")
+			icon.update(
+				{
+					"label": title,
+					"icon_type": "App",
+					"link_type": "External",
+					"app": "whatsapp_next",
+					"link": details["route"],
+					"logo_url": details["logo"],
+				}
+			)
+			icon.insert(ignore_permissions=True, ignore_if_duplicate=True)
+			app_icon = icon.name
+		for ws in frappe.get_all(
+			"Workspace", filters={"app": "whatsapp_next", "public": 1}, fields=["name", "icon"]
+		):
+			if frappe.db.exists("Desktop Icon", ws.name):
+				continue
+			icon = frappe.new_doc("Desktop Icon")
+			icon.update(
+				{
+					"label": ws.name,
+					"icon_type": "Link",
+					"link_type": "Workspace Sidebar",
+					"link_to": ws.name,
+					"icon": ws.icon,
+					"app_name": "whatsapp_next",
+					"parent_icon": app_icon,
+				}
+			)
+			icon.insert(ignore_permissions=True, ignore_if_duplicate=True)
+	except Exception:
+		frappe.log_error(title="WhatsApp Next: desktop icon creation failed")
 
 
 def after_migrate() -> None:
@@ -30,6 +89,25 @@ def after_migrate() -> None:
 	ensure_command_service_user()
 	ensure_settings_defaults()
 	add_indexes()
+	warn_contact_open_to_all()
+	ensure_desktop_icons()
+
+
+def warn_contact_open_to_all() -> None:
+	"""R-028 / D-125: say so, never fix it. Removing role All from `Contact` is the site admin's
+	step in the Role Permission Manager; the app does not change core permissions."""
+	from whatsapp_next.services.permissions import contact_open_to_all
+
+	try:
+		rights = contact_open_to_all()
+	except Exception:
+		return
+	if rights:
+		print(
+			f"whatsapp_next: role All still has {', '.join(rights)} on Contact, so a WhatsApp Contact "
+			"User can open Contacts directly. Remove those rights for All in the Role Permission "
+			"Manager (/app/permission-manager/Contact)."
+		)
 
 
 def ensure_roles() -> None:

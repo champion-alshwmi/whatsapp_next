@@ -46,10 +46,31 @@ def simulate_inbound(device: str, sender_phone: str, text: str, run_commands: bo
 
 
 @api_endpoint(roles=AGENT_UP)
-def send_test(device: str, phone: str, body: str) -> dict[str, Any]:
+def send_test(
+	device: str,
+	phone: str,
+	body: str | None = None,
+	kind: str | None = None,
+	attachment: str | None = None,
+	contact: str | None = None,
+	location: dict | None = None,
+) -> dict[str, Any]:
 	"""Create an `is_test` outbound and start `dispatch.send_test_message` (job) → `{outbound}`;
-	audited `Test Send`. Raises like `quick_send.send` (invalid phone, empty body)."""
-	return {"outbound": simulator.send_test(device, phone, body, user=frappe.session.user)}
+	audited `Test Send`. `kind` text · image · video · document · audio · location · contact
+	(D-137): a file kind takes an uploaded `attachment`, `contact` becomes a .vcf, `location` is
+	`{latitude, longitude, name, address}`. Raises like `quick_send.send`."""
+	return {
+		"outbound": simulator.send_test(
+			device,
+			phone,
+			body,
+			user=frappe.session.user,
+			kind=kind,
+			attachment=attachment,
+			contact=contact,
+			location=location,
+		)
+	}
 
 
 @api_endpoint(roles=MANAGER)
@@ -58,3 +79,17 @@ def dry_run_command(text: str, sender_phone: str, device: str | None = None) -> 
 	inbound — nothing persisted, nothing sent → `{matched, status, command, block_reason, args,
 	reply_body, replies[], error, function_ms}`."""
 	return simulator.dry_run_command(text, sender_phone, device)
+
+
+@api_endpoint(roles=AGENT_UP, methods=("GET", "POST"))
+def list_conversations(txt: str | None = None, limit: int = 30) -> dict[str, Any]:
+	"""The conversation list: individual numbers with party type and last-message preview →
+	`{rows[{phone_e164, display_name, contact, link_status, party_type, last_body, last_at}], total}`."""
+	return simulator.conversations(txt, limit)
+
+
+@api_endpoint(roles=AGENT_UP, methods=("GET", "POST"))
+def get_identity(phone_e164: str) -> dict[str, Any]:
+	"""The "who is this" panel for one number: name, classification, account link, message counts,
+	its accounts and the contact groups it belongs to. P: Agent+."""
+	return simulator.identity(phone_e164)

@@ -15,7 +15,13 @@ from whatsapp_next.functions.context import FunctionResult
 from whatsapp_next.services import command_router as cr
 from whatsapp_next.services import functions_catalog as fc
 from whatsapp_next.services import simulator
-from whatsapp_next.tests.conftest_frappe import delete_all, ensure_contact, ensure_device, ensure_settings
+from whatsapp_next.tests.conftest_frappe import (
+	delete_all,
+	delete_test_rows,
+	ensure_contact,
+	ensure_device,
+	ensure_settings,
+)
 
 SERVICE_USER = "wa-test-svc@example.com"
 P_LINKED = "+966500000601"
@@ -112,17 +118,17 @@ class TestCommandRouter(IntegrationTestCase):
 
 	@classmethod
 	def _reset(cls):
-		delete_all("WhatsApp Queue Item")
-		delete_all("WhatsApp Log", {"source_type": ("in", ["Command Reply", "Simulator"])})
-		delete_all("WhatsApp Inbound Message", {"is_simulated": 1})
+		delete_test_rows("WhatsApp Queue Item")
+		delete_test_rows("WhatsApp Log", {"source_type": ("in", ["Command Reply", "Simulator"])})
+		delete_test_rows("WhatsApp Inbound Message", {"is_simulated": 1})
 		delete_all("WhatsApp Command", {"function": ("in", ["ping", "document_info"])})
 		delete_all("WhatsApp Function", {"name": ("in", ["ping", "document_info"])})
 		cr.clear_map()
 
 	def setUp(self):
-		delete_all("WhatsApp Queue Item")
-		delete_all("WhatsApp Log", {"source_type": ("in", ["Command Reply", "Simulator"])})
-		delete_all("WhatsApp Inbound Message", {"is_simulated": 1})
+		delete_test_rows("WhatsApp Queue Item")
+		delete_test_rows("WhatsApp Log", {"source_type": ("in", ["Command Reply", "Simulator"])})
+		delete_test_rows("WhatsApp Inbound Message", {"is_simulated": 1})
 		g = frappe.get_doc("WhatsApp Contact Group", BLACKLIST)
 		g.set("members", [])
 		g.save(ignore_permissions=True)
@@ -160,6 +166,7 @@ class TestCommandRouter(IntegrationTestCase):
 			seen["dry_run"] = ctx.dry_run
 			return original(ctx)
 
+		replies_before = frappe.db.count("WhatsApp Log", {"source_type": "Command Reply"})
 		with patch.dict(registry.FUNCTION_HANDLERS, {"ping": spy}):
 			res = simulator.simulate_inbound(self.device, P_UNLINKED, "#ping hello world")
 		self.assertEqual(res.status, "Executed")
@@ -168,7 +175,8 @@ class TestCommandRouter(IntegrationTestCase):
 		self.assertEqual(res.args, {"text": "hello world"})
 		self.assertTrue(res.replies[0]["body"].startswith("pong: hello world"))
 		self.assertEqual(res.outbound, [])  # dry run: nothing stored
-		self.assertEqual(frappe.db.count("WhatsApp Log", {"source_type": "Command Reply"}), 0)
+		# the site's own simulated replies stay; this run adds none (R-041)
+		self.assertEqual(frappe.db.count("WhatsApp Log", {"source_type": "Command Reply"}), replies_before)
 		self.assertGreaterEqual(frappe.db.get_value("WhatsApp Function", "ping", "call_count"), 1)
 
 	def test_unknown_help_and_blocks(self):

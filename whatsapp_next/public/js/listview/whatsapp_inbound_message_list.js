@@ -103,8 +103,9 @@
 			],
 			actions: [
 				{ label: __("Reply"), icon: "es-line-reply", condition: is_agent, handler: (d) => reply(d, refresh) },
-				{ label: __("Open command"), icon: "es-line-zap", condition: (d) => !!(d.command_trace && d.command_trace.command), handler: (d) => frappe.set_route("Form", "WhatsApp Command", d.command_trace.command) },
-				{ label: __("Contact"), icon: "es-line-customer", handler: (d) => M.open_contact(d) },
+				{ label: __("Open command"), icon: "es-line-zap", condition: (d) => !!(d.command_trace && d.command_trace.command), handler: (d) => M.open_command(d.command_trace.command) },
+				{ label: __("Add as synonym"), icon: "es-line-add", condition: (d) => M.is_manager() && !(d.command_trace && d.command_trace.command) && !!d.body, handler: (d) => M.add_synonym(d, refresh) },
+				{ label: __("Contact"), icon: "es-line-customer", handler: (d) => M.open_contact(d, refresh) },
 			],
 		}).show();
 
@@ -146,6 +147,42 @@
 				mobile_columns: ["display_name", "command_status"],
 				buttons: [{ label: __("Quick send"), condition: is_agent, action: () => new ui.QuickSend({ on_sent: refresh }) }],
 			});
+
+			// 09 G-07, the prototype's four figures (owner, 2026-09-27): one call, shared by the cards.
+			// Mounted after the toolbar, because both prepend themselves: the figures end up on top.
+			let summary = null;
+			const figure = (pick) => () => {
+				if (!summary) summary = ui.call("messages.get_inbound_summary", { days: 30 }, { silent: true }).finally(() => setTimeout(() => (summary = null), 1000));
+				return summary.then(pick);
+			};
+			const seconds = (v) => (v == null ? "—" : __("{0} s", [(Math.round(v * 10) / 10).toLocaleString(frappe.boot.lang)]));
+			new ui.ListStatsCard({
+				listview,
+				layout: "kpi",
+				refresh_seconds: 60,
+				cards: [
+					{ key: "total", label: __("Total inbound"), icon: "es-line-chat-alt", method: figure((s) => s.total), sub: __("Last 30 days") },
+					{
+						key: "match",
+						label: __("Match rate"),
+						icon: "es-line-success",
+						tone: "green",
+						method: figure((s) => s.match_rate),
+						format: (v) => (v == null ? "—" : `${v}%`),
+						sub: __("A command recognised the message"),
+					},
+					{ key: "unmatched", label: __("Not matched"), icon: "es-line-alert-triangle", tone: "amber", method: figure((s) => s.unmatched), sub: __("Answered with the command list") },
+					{
+						key: "reply",
+						label: __("Average reply time"),
+						icon: "es-line-time",
+						method: figure((s) => s.avg_reply_seconds),
+						format: seconds,
+						sub: __("From receipt to reply"),
+					},
+				],
+			});
+
 		},
 	};
 })();

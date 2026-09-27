@@ -1,8 +1,8 @@
 // whatsapp_command list settings — the Commands screen (matrix row 8, spec §5.5, D-064 prototype
-// anatomy): PageHeader (title, "+ New command" → the CommandModal, "Functions Center N" with the
+// anatomy): PageHeader (title, "+ New command" → the command editor, "Functions Center N" with the
 // installed-functions count, KPIs Commands · Active · Runs (30d) · Inbound without a match),
 // FilterBar, DataList (Command word · Function · Synonyms · Allowed parties · Status · Runs (30d) ·
-// View → MetaDialog), row actions (edit with the "stop to edit" guard, start / stop, restore
+// View → the command editor, D-132), row actions (edit, start / stop, restore
 // defaults, dry-run test) and bulk start / stop through `commands.set_status_many`. PageHeader and
 // DataList are guarded: until they land the list keeps Desk's own header and rows.
 
@@ -57,21 +57,7 @@ frappe.provide("whatsapp_next");
 		}
 	}
 
-	async function edit_command(listview, doc) {
-		if (doc.status === "Active") {
-			try {
-				await ui.ConfirmDialog.ask({
-					title: __("Stop the command to edit it?"),
-					message: __("Active commands are locked. Stopping this command pauses its replies until you start it again."),
-					impact: [{ label: __("Command"), value: doc.code || doc.name }],
-					confirm_label: __("Stop and edit"),
-					on_confirm: () => ui.call("commands.set_status", { name: doc.name, status: "Inactive" }),
-				});
-			} catch (e) {
-				return; // cancelled
-			}
-			refresh_all(listview);
-		}
+	function edit_command(listview, doc) {
 		open_modal(listview, doc.name);
 	}
 
@@ -100,8 +86,8 @@ frappe.provide("whatsapp_next");
 		frappe.set_route("Form", DT, doc.name);
 	}
 
-	/** View: read-only for Active commands and non-managers, editable otherwise. */
-	const view_command = (listview, doc) => open_modal(listview, doc.name, { read_only: doc.status === "Active" || !is_manager() });
+	/** View: the command editor — editable for managers (its header toggle starts / stops the command), read-only otherwise. */
+	const view_command = (listview, doc) => open_modal(listview, doc.name);
 
 	// ---- header ------------------------------------------------------------------------------
 

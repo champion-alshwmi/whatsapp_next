@@ -122,7 +122,7 @@ class FakeProvider(BaseProvider):
 		return SignupState(
 			request_key=request_key,
 			status="Completed",
-			credentials={"customer_api_key": "ck", "api_key": "k", "api_secret": "s"},
+			credentials={"customer_api_key": "ck", "customer_api_secret": "cs", "api_key": "k", "api_secret": "s"},
 		)
 
 	def start_password_reset(self, identifier) -> SignupState:
@@ -145,7 +145,7 @@ class FakeProvider(BaseProvider):
 			"customer_name": "Fake Tenant",
 			"integration_link": "WAIL-FAKE-1",
 			"api_base_url": "https://fake.invalid/api/method/x",
-			"credentials": {"customer_api_key": "ck", "api_key": "k", "api_secret": "s"},
+			"credentials": {"customer_api_key": "ck", "customer_api_secret": "cs", "api_key": "k", "api_secret": "s"},
 		}
 
 	def validate_coupon(self, code, email=None, mobile_e164=None) -> dict:
@@ -357,6 +357,12 @@ class FakeProvider(BaseProvider):
 
 	def parse_webhook(self, headers: Mapping[str, str], body: dict) -> WebhookEvent:
 		return self._snd.parse_webhook(headers, body)
+
+	def webhook_envelope(self, headers: Mapping[str, str]):
+		return self._snd.webhook_envelope(headers)
+
+	def replay_headers(self, event_name: str, event_id: str | None) -> dict[str, str]:
+		return self._snd.replay_headers(event_name, event_id)
 
 	def get_webhook_secret(self) -> str:
 		self._record("get_webhook_secret")
